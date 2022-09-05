@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2020, The Monero Project
+// Copyright (c) 2017-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -66,8 +66,8 @@ namespace trezor {
 
     device_trezor::~device_trezor() {
       try {
-        disconnect();
-        release();
+        device_trezor::disconnect();
+        device_trezor::release();
       } catch(std::exception const& e){
         MWARNING("Could not disconnect and release: " << e.what());
       }
@@ -178,6 +178,15 @@ namespace trezor {
       }
     }
 
+    bool device_trezor::get_public_address_with_no_passphrase(cryptonote::account_public_address &pubkey) {
+      m_reply_with_empty_passphrase = true;
+      const auto empty_passphrase_reverter = epee::misc_utils::create_scope_leave_handler([&]() {
+        m_reply_with_empty_passphrase = false;
+      });
+
+      return get_public_address(pubkey);
+    }
+
     bool device_trezor::get_secret_keys(crypto::secret_key &viewkey , crypto::secret_key &spendkey) {
       try {
         MDEBUG("Loading view-only key from the Trezor. Please check the Trezor for a confirmation.");
@@ -204,6 +213,18 @@ namespace trezor {
 
     void device_trezor::display_address(const cryptonote::subaddress_index& index, const boost::optional<crypto::hash8> &payment_id) {
       get_address(index, payment_id, true);
+    }
+
+    void device_trezor::reset_session() {
+      m_device_session_id.clear();
+    }
+
+    bool device_trezor::seen_passphrase_entry_prompt() {
+      return m_seen_passphrase_entry_message;
+    }
+
+    void device_trezor::set_use_empty_passphrase(bool always_use_empty_passphrase) {
+      m_always_use_empty_passphrase = always_use_empty_passphrase;
     }
 
     /* ======================================================================= */
@@ -303,8 +324,8 @@ namespace trezor {
 
       std::vector<protocol::ki::MoneroTransferDetails> mtds;
       std::vector<protocol::ki::MoneroExportedKeyImage> kis;
-      protocol::ki::key_image_data(wallet, transfers, mtds, client_version() <= 1);
-      protocol::ki::generate_commitment(mtds, transfers, req, client_version() <= 1);
+      protocol::ki::key_image_data(wallet, transfers, mtds);
+      protocol::ki::generate_commitment(mtds, transfers, req);
 
       EVENT_PROGRESS(0.);
       this->set_msg_addr<messages::monero::MoneroKeyImageExportInitRequest>(req.get());
@@ -614,11 +635,7 @@ namespace trezor {
       }
 
       // Step: sort
-      auto perm_req = signer->step_permutation();
-      if (perm_req){
-        auto perm_ack = this->client_exchange<messages::monero::MoneroTransactionInputsPermutationAck>(perm_req);
-        signer->step_permutation_ack(perm_ack);
-      }
+      signer->sort_ki();
       EVENT_PROGRESS(3, 1, 1);
 
       // Step: input_vini
@@ -676,13 +693,13 @@ namespace trezor {
     unsigned device_trezor::client_version()
     {
       auto trezor_version = get_version();
-      if (trezor_version <= pack_version(2, 0, 10)){
-        throw exc::TrezorException("Trezor firmware 2.0.10 and lower are not supported. Please update.");
+      if (trezor_version < pack_version(2, 4, 3)){
+        throw exc::TrezorException("Minimal Trezor firmware version is 2.4.3. Please update.");
       }
 
-      unsigned client_version = 1;
-      if (trezor_version >= pack_version(2, 3, 1)){
-        client_version = 3;
+      unsigned client_version = 3;
+      if (trezor_version >= pack_version(2, 5, 2)){
+        client_version = 4;
       }
 
 #ifdef WITH_TREZOR_DEBUGGING
@@ -718,14 +735,6 @@ namespace trezor {
       CHECK_AND_ASSERT_THROW_MES(init_msg, "TransactionInitRequest is empty");
       CHECK_AND_ASSERT_THROW_MES(init_msg->has_tsx_data(), "TransactionInitRequest has no transaction data");
       CHECK_AND_ASSERT_THROW_MES(m_features, "Device state not initialized");  // make sure the caller did not reset features
-      const bool nonce_required = init_msg->tsx_data().has_payment_id() && init_msg->tsx_data().payment_id().size() > 0;
-
-      if (nonce_required && init_msg->tsx_data().payment_id().size() == 8){
-        // Versions 2.0.9 and lower do not support payment ID
-        if (get_version() <= pack_version(2, 0, 9)) {
-          throw exc::TrezorException("Trezor firmware 2.0.9 and lower does not support transactions with short payment IDs or integrated addresses. Please update.");
-        }
-      }
     }
 
     void device_trezor::transaction_check(const protocol::tx::TData & tdata, const hw::tx_aux_data & aux_data)

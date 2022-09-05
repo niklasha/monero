@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2020, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -154,18 +154,20 @@ struct Wallet2CallbackImpl : public tools::i_wallet2_callback
         }
     }
 
-    virtual void on_money_received(uint64_t height, const crypto::hash &txid, const cryptonote::transaction& tx, uint64_t amount, const cryptonote::subaddress_index& subaddr_index, bool is_change, uint64_t unlock_time)
+    virtual void on_money_received(uint64_t height, const crypto::hash &txid, const cryptonote::transaction& tx, uint64_t amount, uint64_t burnt, const cryptonote::subaddress_index& subaddr_index, bool is_change, uint64_t unlock_time)
     {
 
         std::string tx_hash =  epee::string_tools::pod_to_hex(txid);
 
         LOG_PRINT_L3(__FUNCTION__ << ": money received. height:  " << height
                      << ", tx: " << tx_hash
-                     << ", amount: " << print_money(amount)
+                     << ", amount: " << print_money(amount - burnt)
+                     << ", burnt: " << print_money(burnt)
+                     << ", raw_output_value: " << print_money(amount)
                      << ", idx: " << subaddr_index);
         // do not signal on received tx if wallet is not syncronized completely
         if (m_listener && m_wallet->synchronized()) {
-            m_listener->moneyReceived(tx_hash, amount);
+            m_listener->moneyReceived(tx_hash, amount - burnt);
             m_listener->updated();
         }
     }
@@ -450,7 +452,7 @@ WalletImpl::~WalletImpl()
     LOG_PRINT_L1(__FUNCTION__);
     m_wallet->callback(NULL);
     // Pause refresh thread - prevents refresh from starting again
-    pauseRefresh();
+    WalletImpl::pauseRefresh(); // Call the method directly (not polymorphically) to protect against UB in destructor.
     // Close wallet - stores cache and stops ongoing refresh operation 
     close(false); // do not store wallet as part of the closing activities
     // Stop refresh thread
@@ -1280,6 +1282,42 @@ bool WalletImpl::importOutputs(const string &filename)
     return true;
 }
 
+bool WalletImpl::scanTransactions(const std::vector<std::string> &txids)
+{
+    if (txids.empty())
+    {
+        setStatusError(string(tr("Failed to scan transactions: no transaction ids provided.")));
+        return false;
+    }
+
+    // Parse and dedup args
+    std::unordered_set<crypto::hash> txids_u;
+    for (const auto &s : txids)
+    {
+        crypto::hash txid;
+        if (!epee::string_tools::hex_to_pod(s, txid))
+        {
+            setStatusError(string(tr("Invalid txid specified: ")) + s);
+            return false;
+        }
+        txids_u.insert(txid);
+    }
+    std::vector<crypto::hash> txids_v(txids_u.begin(), txids_u.end());
+
+    try
+    {
+        m_wallet->scan_tx(txids_v);
+    }
+    catch (const std::exception &e)
+    {
+        LOG_ERROR("Failed to scan transaction: " << e.what());
+        setStatusError(string(tr("Failed to scan transaction: ")) + e.what());
+        return false;
+    }
+
+    return true;
+}
+
 void WalletImpl::addSubaddressAccount(const std::string& label)
 {
     m_wallet->add_subaddress_account(label);
@@ -1332,7 +1370,7 @@ MultisigState WalletImpl::multisig() const {
 string WalletImpl::getMultisigInfo() const {
     try {
         clearStatus();
-        return m_wallet->get_multisig_info();
+        return m_wallet->get_multisig_first_kex_msg();
     } catch (const exception& e) {
         LOG_ERROR("Error on generating multisig info: " << e.what());
         setStatusError(string(tr("Failed to get multisig info: ")) + e.what());
@@ -1341,7 +1379,7 @@ string WalletImpl::getMultisigInfo() const {
     return string();
 }
 
-string WalletImpl::makeMultisig(const vector<string>& info, uint32_t threshold) {
+string WalletImpl::makeMultisig(const vector<string>& info, const uint32_t threshold) {
     try {
         clearStatus();
 
@@ -1366,28 +1404,10 @@ std::string WalletImpl::exchangeMultisigKeys(const std::vector<std::string> &inf
         return m_wallet->exchange_multisig_keys(epee::wipeable_string(m_password), info);
     } catch (const exception& e) {
         LOG_ERROR("Error on exchanging multisig keys: " << e.what());
-        setStatusError(string(tr("Failed to make multisig: ")) + e.what());
+        setStatusError(string(tr("Failed to exchange multisig keys: ")) + e.what());
     }
 
     return string();
-}
-
-bool WalletImpl::finalizeMultisig(const vector<string>& extraMultisigInfo) {
-    try {
-        clearStatus();
-        checkMultisigWalletNotReady(m_wallet);
-
-        if (m_wallet->finalize_multisig(epee::wipeable_string(m_password), extraMultisigInfo)) {
-            return true;
-        }
-
-        setStatusError(tr("Failed to finalize multisig wallet creation"));
-    } catch (const exception& e) {
-        LOG_ERROR("Error on finalizing multisig wallet creation: " << e.what());
-        setStatusError(string(tr("Failed to finalize multisig wallet creation: ")) + e.what());
-    }
-
-    return false;
 }
 
 bool WalletImpl::exportMultisigImages(string& images) {
@@ -1760,8 +1780,9 @@ uint64_t WalletImpl::estimateTransactionFee(const std::vector<std::pair<std::str
         extra_size,
         m_wallet->use_fork_rules(8, 0),
         m_wallet->use_fork_rules(HF_VERSION_CLSAG, 0),
+        m_wallet->use_fork_rules(HF_VERSION_BULLETPROOF_PLUS, 0),
+        m_wallet->use_fork_rules(HF_VERSION_VIEW_TAGS, 0),
         m_wallet->get_base_fee(),
-        m_wallet->get_fee_multiplier(m_wallet->adjust_priority(static_cast<uint32_t>(priority))),
         m_wallet->get_fee_quantization_mask());
 }
 

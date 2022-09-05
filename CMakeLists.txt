@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2020, The Monero Project
+# Copyright (c) 2014-2022, The Monero Project
 #
 # All rights reserved.
 #
@@ -91,6 +91,14 @@ elseif (USE_CLANG_TIDY_CXX)
 endif()
 
 enable_language(C ASM)
+
+# Require C11/C++11 and disable extensions for all targets
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 function (die msg)
   if (NOT WIN32)
@@ -317,6 +325,16 @@ if(ARCH_ID STREQUAL "s390x")
   set(S390X 1)
 endif()
 
+if(ARCH_ID STREQUAL "riscv64")
+set(RISCV   1)
+set(RISCV64 1)
+endif()
+
+if(ARCH_ID STREQUAL "riscv32")
+set(RISCV   1)
+set(RISCV32 1)
+endif()
+
 if(WIN32 OR ARM OR PPC64LE OR PPC64 OR PPC)
   set(OPT_FLAGS_RELEASE "-O2")
 else()
@@ -347,7 +365,6 @@ if(NOT MANUAL_SUBMODULES)
     
     message(STATUS "Checking submodules")
     check_submodule(external/miniupnp)
-    check_submodule(external/unbound)
     check_submodule(external/rapidjson)
     check_submodule(external/trezor-common)
     check_submodule(external/randomx)
@@ -384,18 +401,6 @@ endif()
 
 message(STATUS "BOOST_IGNORE_SYSTEM_PATHS defaults to ${BOOST_IGNORE_SYSTEM_PATHS_DEFAULT}")
 option(BOOST_IGNORE_SYSTEM_PATHS "Ignore boost system paths for local boost installation" ${BOOST_IGNORE_SYSTEM_PATHS_DEFAULT})
-
-
-if (NOT DEFINED ENV{DEVELOPER_LIBUNBOUND_OLD})
-  message(STATUS "Could not find DEVELOPER_LIBUNBOUND_OLD in env (not required)")
-elseif ("$ENV{DEVELOPER_LIBUNBOUND_OLD}" EQUAL 1)
-  message(STATUS "Found: env DEVELOPER_LIBUNBOUND_OLD = 1, will use the work around")
-  add_definitions(-DDEVELOPER_LIBUNBOUND_OLD)
-elseif ("$ENV{DEVELOPER_LIBUNBOUND_OLD}" EQUAL 0)
-  message(STATUS "Found: env DEVELOPER_LIBUNBOUND_OLD = 0")
-else()
-  message(STATUS "Found: env DEVELOPER_LIBUNBOUND_OLD with bad value. Will NOT use the work around")
-endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 enable_testing()
@@ -456,10 +461,7 @@ endif()
 include_directories(external/rapidjson/include external/easylogging++ src contrib/epee/include external external/supercop/include)
 
 if(APPLE)
-  include_directories(SYSTEM /usr/include/malloc)
-  if(POLICY CMP0042)
-    cmake_policy(SET CMP0042 NEW)
-  endif()
+  cmake_policy(SET CMP0042 NEW)
 endif()
 
 if(MSVC OR MINGW)
@@ -470,9 +472,11 @@ endif()
 option(STATIC "Link libraries statically" ${DEFAULT_STATIC})
 
 # This is a CMake built-in switch that concerns internal libraries
-if (NOT DEFINED BUILD_SHARED_LIBS AND NOT STATIC AND CMAKE_BUILD_TYPE_LOWER STREQUAL "debug")
-    set(BUILD_SHARED_LIBS ON)
+set(BUILD_SHARED_LIBS_DEFAULT OFF)
+if (NOT STATIC AND CMAKE_BUILD_TYPE_LOWER STREQUAL "debug")
+	set(BUILD_SHARED_LIBS_DEFAULT ON)
 endif()
+option(BUILD_SHARED_LIBS "Build internal libraries as shared" ${BUILD_SHARED_LIBS_DEFAULT})
 
 if (BUILD_SHARED_LIBS)
   message(STATUS "Building internal libraries with position independent code")
@@ -504,6 +508,7 @@ if(STATIC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DZMQ_STATIC")
 endif()
 
+option(SANITIZE "Use ASAN memory sanitizer" OFF)
 if(SANITIZE)
   if (MSVC)
     message(FATAL_ERROR "Cannot sanitize with MSVC")
@@ -572,7 +577,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "(SunOS|Solaris)")
 endif ()
 
 if (APPLE AND NOT IOS)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=default -std=c++11")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=default")
   if (NOT OPENSSL_ROOT_DIR)
       EXECUTE_PROCESS(COMMAND brew --prefix openssl
         OUTPUT_VARIABLE OPENSSL_ROOT_DIR
@@ -619,8 +624,6 @@ endfunction()
 if (NOT (MSVC OR ARCH))
     set_default_arch()
 endif()
-
-CHECK_C_COMPILER_FLAG(-std=c11 HAVE_C11)
 
 option(COVERAGE "Enable profiling for test coverage report" OFF)
 if(COVERAGE)
@@ -674,8 +677,7 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}/translations")
 add_subdirectory(external)
 
 # Final setup for libunbound
-include_directories(${UNBOUND_INCLUDE})
-link_directories(${UNBOUND_LIBRARY_DIRS})
+include_directories(${UNBOUND_INCLUDE_DIR})
 
 # Final setup for easylogging++
 include_directories(${EASYLOGGING_INCLUDE})
@@ -694,7 +696,7 @@ if (HIDAPI_FOUND)
   add_definitions(-DHAVE_HIDAPI)
   include_directories(${HIDAPI_INCLUDE_DIR})
   link_directories(${LIBHIDAPI_LIBRARY_DIRS})
-else (HIDAPI_FOUND)
+else()
   message(STATUS "Could not find HIDAPI")
 endif()
 
@@ -746,7 +748,7 @@ else()
     message(STATUS "AES support explicitly disabled")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNO_AES")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNO_AES")
-  elseif(NOT ARM AND NOT PPC64LE AND NOT PPC64 AND NOT PPC AND NOT S390X)
+  elseif(NOT ARM AND NOT PPC64LE AND NOT PPC64 AND NOT PPC AND NOT S390X AND NOT RISCV)
     message(STATUS "AES support enabled")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -maes")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -maes")
@@ -754,6 +756,8 @@ else()
     message(STATUS "AES support not available on POWER")
   elseif(S390X)
     message(STATUS "AES support not available on s390x")
+  elseif(RISCV)
+    message(STATUS "AES support not available on RISC-V")
   elseif(ARM6)
     message(STATUS "AES support not available on ARMv6")
   elseif(ARM7)
@@ -774,7 +778,7 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARCH_FLAG}")
 
   set(WARNINGS "-Wall -Wextra -Wpointer-arith -Wundef -Wvla -Wwrite-strings -Wno-error=extra -Wno-error=deprecated-declarations -Wno-unused-parameter -Wno-error=unused-variable -Wno-error=undef -Wno-error=uninitialized")
-  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(ARM)
       set(WARNINGS "${WARNINGS} -Wno-error=inline-asm")
     endif()
@@ -795,14 +799,14 @@ else()
   endif()
   set(C_WARNINGS "-Waggregate-return -Wnested-externs -Wold-style-definition -Wstrict-prototypes")
   set(CXX_WARNINGS "-Wno-reorder -Wno-missing-field-initializers")
-  try_compile(STATIC_ASSERT_RES "${CMAKE_CURRENT_BINARY_DIR}/static-assert" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test-static-assert.c" COMPILE_DEFINITIONS "-std=c11")
+  try_compile(STATIC_ASSERT_RES "${CMAKE_CURRENT_BINARY_DIR}/static-assert" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test-static-assert.c" CMAKE_FLAGS -DCMAKE_C_STANDARD=11)
   if(STATIC_ASSERT_RES)
     set(STATIC_ASSERT_FLAG "")
   else()
     set(STATIC_ASSERT_FLAG "-Dstatic_assert=_Static_assert")
   endif()
 
-  try_compile(STATIC_ASSERT_CPP_RES "${CMAKE_CURRENT_BINARY_DIR}/static-assert" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test-static-assert.cpp" COMPILE_DEFINITIONS "-std=c++11")
+  try_compile(STATIC_ASSERT_CPP_RES "${CMAKE_CURRENT_BINARY_DIR}/static-assert" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test-static-assert.cpp" CMAKE_FLAGS -DCMAKE_CXX_STANDARD=11)
   if(STATIC_ASSERT_CPP_RES)
     set(STATIC_ASSERT_CPP_FLAG "")
   else()
@@ -898,8 +902,8 @@ else()
   message(STATUS "Using C++ security hardening flags: ${CXX_SECURITY_FLAGS}")
   message(STATUS "Using linker security hardening flags: ${LD_SECURITY_FLAGS}")
 
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11 -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_FLAG} ${WARNINGS} ${C_WARNINGS} ${PIC_FLAG} ${C_SECURITY_FLAGS}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_CPP_FLAG} ${WARNINGS} ${CXX_WARNINGS} ${PIC_FLAG} ${CXX_SECURITY_FLAGS}")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_FLAG} ${WARNINGS} ${C_WARNINGS} ${PIC_FLAG} ${C_SECURITY_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_CPP_FLAG} ${WARNINGS} ${CXX_WARNINGS} ${PIC_FLAG} ${CXX_SECURITY_FLAGS}")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LD_SECURITY_FLAGS} ${LD_BACKCOMPAT_FLAGS}")
 
   # With GCC 6.1.1 the compiled binary malfunctions due to aliasing. Until that
@@ -1003,11 +1007,6 @@ else()
   endif()
 
   set(DEBUG_FLAGS "-g3")
-  if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND NOT (CMAKE_C_COMPILER_VERSION VERSION_LESS 4.8))
-    set(DEBUG_FLAGS "${DEBUG_FLAGS} -Og ")
-  else()
-    set(DEBUG_FLAGS "${DEBUG_FLAGS} -O0 ")
-  endif()
 
   # At least some CLANGs default to not enough for monero
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftemplate-depth=900")
@@ -1077,6 +1076,7 @@ if(STATIC)
   set(Boost_USE_STATIC_RUNTIME ON)
 endif()
 find_package(Boost 1.58 QUIET REQUIRED COMPONENTS system filesystem thread date_time chrono regex serialization program_options locale)
+add_definitions(-DBOOST_ASIO_ENABLE_SEQUENTIAL_STRAND_ALLOCATION)
 
 set(CMAKE_FIND_LIBRARY_SUFFIXES ${OLD_LIB_SUFFIXES})
 if(NOT Boost_FOUND)
@@ -1243,10 +1243,6 @@ endif()
 
 # when ON - will install libwallet_merged into "lib"
 option(BUILD_GUI_DEPS "Build GUI dependencies." OFF)
-
-# This is not nice, distribution packagers should not enable this, but depend
-# on libunbound shipped with their distribution instead
-option(INSTALL_VENDORED_LIBUNBOUND "Install libunbound binary built from source vendored with this repo." OFF)
 
 find_package(PythonInterp)
 find_program(iwyu_tool_path NAMES iwyu_tool.py iwyu_tool)

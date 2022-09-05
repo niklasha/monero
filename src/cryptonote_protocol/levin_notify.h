@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2020, The Monero Project
+// Copyright (c) 2019-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -100,6 +100,9 @@ namespace levin
 
     //! Probe for new outbound connection - skips if not needed.
     void new_out_connection();
+
+    void on_handshake_complete(const boost::uuids::uuid &id, bool is_income);
+    void on_connection_close(const boost::uuids::uuid &id);
 
     //! Run the logic for the next epoch immediately. Only use in testing.
     void run_epoch();

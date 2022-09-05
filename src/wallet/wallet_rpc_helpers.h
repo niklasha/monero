@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2020, The Monero Project
+// Copyright (c) 2018-2022, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <limits>
 #include <type_traits>
 
 namespace

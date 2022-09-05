@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2020, The Monero Project
+# Copyright (c) 2014-2022, The Monero Project
 # 
 # All rights reserved.
 # 
@@ -35,11 +35,9 @@ monero_add_library(epee byte_slice.cpp byte_stream.cpp hex.cpp abstract_http_cli
     wipeable_string.cpp levin_base.cpp memwipe.c connection_basic.cpp network_throttle.cpp network_throttle-detail.cpp mlocker.cpp buffer.cpp net_ssl.cpp
     int-util.cpp portable_storage.cpp
     misc_language.cpp
-    misc_os_dependent.cpp
     file_io_utils.cpp
     net_parse_helpers.cpp
     http_base.cpp
-    tiny_ini.cpp
     ${EPEE_HEADERS_PUBLIC}
     )
 
@@ -47,9 +45,7 @@ if (USE_READLINE AND (GNU_READLINE_FOUND OR (DEPENDS AND NOT MINGW)))
   monero_add_library(epee_readline readline_buffer.cpp)
 endif()
 
-if(HAVE_C11)
-SET_PROPERTY(SOURCE memwipe.c PROPERTY COMPILE_FLAGS -std=c11)
-endif()
+set_property(SOURCE memwipe.c PROPERTY C_STANDARD 11)
 
 # Build and install libepee if we're building for GUI
 if (BUILD_GUI_DEPS)

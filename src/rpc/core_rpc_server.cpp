@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2020, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -48,6 +48,7 @@ using namespace epee;
 #include "cryptonote_basic/merge_mining.h"
 #include "cryptonote_core/tx_sanity_check.h"
 #include "misc_language.h"
+#include "net/local_ip.h"
 #include "net/parse.h"
 #include "storages/http_abstract_invoke.h"
 #include "crypto/hash.h"
@@ -242,11 +243,11 @@ namespace cryptonote
       auto get_nodes = [this]() {
         return get_public_nodes(credits_per_hash_threshold);
       };
-      m_bootstrap_daemon.reset(new bootstrap_daemon(std::move(get_nodes), rpc_payment_enabled, proxy));
+      m_bootstrap_daemon.reset(new bootstrap_daemon(std::move(get_nodes), rpc_payment_enabled, m_bootstrap_daemon_proxy.empty() ? proxy : m_bootstrap_daemon_proxy));
     }
     else
     {
-      m_bootstrap_daemon.reset(new bootstrap_daemon(address, credentials, rpc_payment_enabled, proxy));
+      m_bootstrap_daemon.reset(new bootstrap_daemon(address, credentials, rpc_payment_enabled, m_bootstrap_daemon_proxy.empty() ? proxy : m_bootstrap_daemon_proxy));
     }
 
     m_should_use_bootstrap_daemon = m_bootstrap_daemon.get() != nullptr;
@@ -264,8 +265,10 @@ namespace cryptonote
       , const bool restricted
       , const std::string& port
       , bool allow_rpc_payment
+      , const std::string& proxy
     )
   {
+    m_bootstrap_daemon_proxy = proxy;
     m_restricted = restricted;
     m_net_server.set_threads_prefix("RPC");
     m_net_server.set_connection_filter(&m_p2p);
@@ -347,12 +350,23 @@ namespace cryptonote
 
     bool store_ssl_key = !restricted && rpc_config->ssl_options && rpc_config->ssl_options.auth.certificate_path.empty();
     const auto ssl_base_path = (boost::filesystem::path{data_dir} / "rpc_ssl").string();
-    if (store_ssl_key && boost::filesystem::exists(ssl_base_path + ".crt"))
+    const bool ssl_cert_file_exists = boost::filesystem::exists(ssl_base_path + ".crt");
+    const bool ssl_pkey_file_exists = boost::filesystem::exists(ssl_base_path + ".key");
+    if (store_ssl_key)
     {
-      // load key from previous run, password prompted by OpenSSL
-      store_ssl_key = false;
-      rpc_config->ssl_options.auth =
-        epee::net_utils::ssl_authentication_t{ssl_base_path + ".key", ssl_base_path + ".crt"};
+      // .key files are often given different read permissions as their corresponding .crt files.
+      // Consequently, sometimes the .key file wont't get copied, while the .crt file will.
+      if (ssl_cert_file_exists != ssl_pkey_file_exists)
+      {
+        MFATAL("Certificate (.crt) and private key (.key) files must both exist or both not exist at path: " << ssl_base_path);
+        return false;
+      }
+      else if (ssl_cert_file_exists) { // and ssl_pkey_file_exists
+        // load key from previous run, password prompted by OpenSSL
+        store_ssl_key = false;
+        rpc_config->ssl_options.auth =
+          epee::net_utils::ssl_authentication_t{ssl_base_path + ".key", ssl_base_path + ".crt"};
+      }
     }
 
     auto rng = [](size_t len, uint8_t *ptr){ return crypto::rand(len, ptr); };
@@ -361,6 +375,8 @@ namespace cryptonote
       std::move(bind_ipv6_str), std::move(rpc_config->use_ipv6), std::move(rpc_config->require_ipv4),
       std::move(rpc_config->access_control_origins), std::move(http_login), std::move(rpc_config->ssl_options)
     );
+
+    m_net_server.get_config_object().m_max_content_length = MAX_RPC_CONTENT_LENGTH;
 
     if (store_ssl_key && inited)
     {
@@ -532,6 +548,7 @@ namespace cryptonote
     res.version = restricted ? "" : MONERO_VERSION_FULL;
     res.synchronized = check_core_ready();
     res.busy_syncing = m_p2p.get_payload_object().is_busy_syncing();
+    res.restricted = restricted;
 
     res.status = CORE_RPC_STATUS_OK;
     return true;
@@ -970,14 +987,26 @@ namespace cryptonote
       LOG_PRINT_L2("Found " << found_in_pool << "/" << vh.size() << " transactions in the pool");
     }
 
-    std::vector<std::string>::const_iterator txhi = req.txs_hashes.begin();
-    std::vector<crypto::hash>::const_iterator vhi = vh.begin();
+    CHECK_AND_ASSERT_MES(txs.size() + missed_txs.size() == vh.size(), false, "mismatched number of txs");
+
+    auto txhi = req.txs_hashes.cbegin();
+    auto vhi = vh.cbegin();
+    auto missedi = missed_txs.cbegin();
+
     for(auto& tx: txs)
     {
       res.txs.push_back(COMMAND_RPC_GET_TRANSACTIONS::entry());
       COMMAND_RPC_GET_TRANSACTIONS::entry &e = res.txs.back();
 
+      while (missedi != missed_txs.end() && *missedi == *vhi)
+      {
+          ++vhi;
+          ++txhi;
+          ++missedi;
+      }
+
       crypto::hash tx_hash = *vhi++;
+      CHECK_AND_ASSERT_MES(tx_hash == std::get<0>(tx), false, "mismatched tx hash");
       e.tx_hash = *txhi++;
       e.prunable_hash = epee::string_tools::pod_to_hex(std::get<2>(tx));
       if (req.split || req.prune || std::get<3>(tx).empty())
@@ -1858,6 +1887,80 @@ namespace cryptonote
     res.blocktemplate_blob = string_tools::buff_to_hex_nodelimer(block_blob);
     res.blockhashing_blob =  string_tools::buff_to_hex_nodelimer(hashing_blob);
     res.status = CORE_RPC_STATUS_OK;
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::on_getminerdata(const COMMAND_RPC_GETMINERDATA::request& req, COMMAND_RPC_GETMINERDATA::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx)
+  {
+    if(!check_core_ready())
+    {
+      error_resp.code = CORE_RPC_ERROR_CODE_CORE_BUSY;
+      error_resp.message = "Core is busy";
+      return false;
+    }
+
+    crypto::hash prev_id, seed_hash;
+    difficulty_type difficulty;
+
+    std::vector<tx_block_template_backlog_entry> tx_backlog;
+    if (!m_core.get_miner_data(res.major_version, res.height, prev_id, seed_hash, difficulty, res.median_weight, res.already_generated_coins, tx_backlog))
+    {
+      error_resp.code = CORE_RPC_ERROR_CODE_INTERNAL_ERROR;
+      error_resp.message = "Internal error: failed to get miner data";
+      LOG_ERROR("Failed to get miner data");
+      return false;
+    }
+
+    res.tx_backlog.clear();
+    res.tx_backlog.reserve(tx_backlog.size());
+
+    for (const auto& entry : tx_backlog)
+    {
+      res.tx_backlog.emplace_back(COMMAND_RPC_GETMINERDATA::response::tx_backlog_entry{string_tools::pod_to_hex(entry.id), entry.weight, entry.fee});
+    }
+
+    res.prev_id = string_tools::pod_to_hex(prev_id);
+    res.seed_hash = string_tools::pod_to_hex(seed_hash);
+    res.difficulty = cryptonote::hex(difficulty);
+
+    res.status = CORE_RPC_STATUS_OK;
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::on_calcpow(const COMMAND_RPC_CALCPOW::request& req, COMMAND_RPC_CALCPOW::response& res, epee::json_rpc::error& error_resp, const connection_context *ctx)
+  {
+    RPC_TRACKER(calcpow);
+
+    blobdata blockblob;
+    if(!string_tools::parse_hexstr_to_binbuff(req.block_blob, blockblob))
+    {
+      error_resp.code = CORE_RPC_ERROR_CODE_WRONG_BLOCKBLOB;
+      error_resp.message = "Wrong block blob";
+      return false;
+    }
+    if(!m_core.check_incoming_block_size(blockblob))
+    {
+      error_resp.code = CORE_RPC_ERROR_CODE_WRONG_BLOCKBLOB_SIZE;
+      error_resp.message = "Block blob size is too big, rejecting block";
+      return false;
+    }
+    crypto::hash seed_hash, pow_hash;
+    std::string buf;
+    if(req.seed_hash.size())
+    {
+      if (!string_tools::parse_hexstr_to_binbuff(req.seed_hash, buf) ||
+        buf.size() != sizeof(crypto::hash))
+      {
+        error_resp.code = CORE_RPC_ERROR_CODE_WRONG_PARAM;
+        error_resp.message = "Wrong seed hash";
+        return false;
+      }
+      buf.copy(reinterpret_cast<char *>(&seed_hash), sizeof(crypto::hash));
+    }
+
+    cryptonote::get_block_longhash(&(m_core.get_blockchain_storage()), blockblob, pow_hash, req.height,
+      req.major_version, req.seed_hash.size() ? &seed_hash : NULL, 0);
+    res = string_tools::pod_to_hex(pow_hash);
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------------
@@ -2781,7 +2884,17 @@ namespace cryptonote
       return r;
 
     CHECK_PAYMENT(req, res, COST_PER_FEE_ESTIMATE);
-    res.fee = m_core.get_blockchain_storage().get_dynamic_base_fee_estimate(req.grace_blocks);
+
+    const uint8_t version = m_core.get_blockchain_storage().get_current_hard_fork_version();
+    if (version >= HF_VERSION_2021_SCALING)
+    {
+      m_core.get_blockchain_storage().get_dynamic_base_fee_estimate_2021_scaling(req.grace_blocks, res.fees);
+      res.fee = res.fees[0];
+    }
+    else
+    {
+      res.fee = m_core.get_blockchain_storage().get_dynamic_base_fee_estimate(req.grace_blocks);
+    }
     res.quantization_mask = Blockchain::get_fee_quantization_mask();
     res.status = CORE_RPC_STATUS_OK;
     return true;
@@ -2847,7 +2960,7 @@ namespace cryptonote
     {
       if (req.limit_down != -1)
       {
-        res.status = CORE_RPC_ERROR_CODE_WRONG_PARAM;
+        res.status = "Invalid parameter";
         return true;
       }
       epee::net_utils::connection_basic::set_rate_down_limit(nodetool::default_limit_down);
@@ -2861,7 +2974,7 @@ namespace cryptonote
     {
       if (req.limit_up != -1)
       {
-        res.status = CORE_RPC_ERROR_CODE_WRONG_PARAM;
+        res.status = "Invalid parameter";
         return true;
       }
       epee::net_utils::connection_basic::set_rate_up_limit(nodetool::default_limit_up);
@@ -3113,6 +3226,14 @@ namespace cryptonote
     if (use_bootstrap_daemon_if_necessary<COMMAND_RPC_GET_OUTPUT_DISTRIBUTION>(invoke_http_mode::JON_RPC, "get_output_distribution", req, res, r))
       return r;
 
+    const bool restricted = m_restricted && ctx;
+    if (restricted && req.amounts != std::vector<uint64_t>(1, 0))
+    {
+      error_resp.code = CORE_RPC_ERROR_CODE_RESTRICTED;
+      error_resp.message = "Restricted RPC can only get output distribution for rct outputs. Use your own node.";
+      return false;
+    }
+
     size_t n_0 = 0, n_non0 = 0;
     for (uint64_t amount: req.amounts)
       if (amount) ++n_non0; else ++n_0;
@@ -3153,6 +3274,13 @@ namespace cryptonote
     bool r;
     if (use_bootstrap_daemon_if_necessary<COMMAND_RPC_GET_OUTPUT_DISTRIBUTION>(invoke_http_mode::BIN, "/get_output_distribution.bin", req, res, r))
       return r;
+
+    const bool restricted = m_restricted && ctx;
+    if (restricted && req.amounts != std::vector<uint64_t>(1, 0))
+    {
+      res.status = "Restricted RPC can only get output distribution for rct outputs. Use your own node.";
+      return false;
+    }
 
     size_t n_0 = 0, n_non0 = 0;
     for (uint64_t amount: req.amounts)

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2020, The Monero Project
+// Copyright (c) 2014-2022, The Monero Project
 //
 // All rights reserved.
 //
@@ -147,7 +147,6 @@ public:
     std::string getMultisigInfo() const override;
     std::string makeMultisig(const std::vector<std::string>& info, uint32_t threshold) override;
     std::string exchangeMultisigKeys(const std::vector<std::string> &info) override;
-    bool finalizeMultisig(const std::vector<std::string>& extraMultisigInfo) override;
     bool exportMultisigImages(std::string& images) override;
     size_t importMultisigImages(const std::vector<std::string>& images) override;
     bool hasMultisigPartialKeyImages() const override;
@@ -170,6 +169,7 @@ public:
     bool importKeyImages(const std::string &filename) override;
     bool exportOutputs(const std::string &filename, bool all = false) override;
     bool importOutputs(const std::string &filename) override;
+    bool scanTransactions(const std::vector<std::string> &txids) override;
 
     virtual void disposeTransaction(PendingTransaction * t) override;
     virtual uint64_t estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
